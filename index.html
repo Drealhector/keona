@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Katy — the eye</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #111; color: #eee; margin: 0; padding: 24px; text-align: center; }
+    h1 { font-weight: 700; letter-spacing: 1px; }
+    video { width: 100%; max-width: 640px; border-radius: 12px; background: #000; }
+    button { font-size: 18px; padding: 14px 22px; margin: 8px 4px; border: 0; border-radius: 10px; background: #ea580c; color: #fff; cursor: pointer; }
+    button.teach { background: #0f766e; }
+    button:disabled { background: #555; cursor: wait; }
+    input { font-size: 18px; padding: 12px; border-radius: 10px; border: 1px solid #444; background: #1c1c1c; color: #eee; max-width: 260px; }
+    #answer { max-width: 640px; margin: 20px auto 0; font-size: 18px; line-height: 1.5; min-height: 28px; }
+    #known { max-width: 640px; margin: 12px auto 0; font-size: 14px; color: #888; }
+  </style>
+</head>
+<body>
+  <h1>👁️ Katy</h1>
+  <video id="cam" autoplay playsinline muted></video>
+  <canvas id="frame" style="display:none"></canvas>
+
+  <div>
+    <button id="ask">What do you see?</button>
+  </div>
+  <div>
+    <input id="name" placeholder="name it (e.g. Pepper)" />
+    <button id="teach" class="teach">Teach this</button>
+  </div>
+
+  <div id="answer">Point the camera at something, then click a button.</div>
+  <div id="known"></div>
+
+  <script>
+    const video = document.getElementById("cam");
+    const canvas = document.getElementById("frame");
+    const askBtn = document.getElementById("ask");
+    const teachBtn = document.getElementById("teach");
+    const nameInput = document.getElementById("name");
+    const answer = document.getElementById("answer");
+    const known = document.getElementById("known");
+
+    // Turn the camera on (prefers the back camera if there is one).
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
+      .then((stream) => { video.srcObject = stream; })
+      .catch((err) => { answer.textContent = "Could not open the camera: " + err.message; });
+
+    // Grab one still picture from the live camera.
+    function snapshot() {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      canvas.getContext("2d").drawImage(video, 0, 0);
+      return canvas.toDataURL("image/jpeg", 0.7);
+    }
+
+    async function refreshKnown() {
+      const res = await fetch("/known");
+      const data = await res.json();
+      known.textContent = data.names.length ? "Katy knows: " + data.names.join(", ") : "Katy hasn't been taught anything yet.";
+    }
+
+    askBtn.addEventListener("click", async () => {
+      askBtn.disabled = true;
+      answer.textContent = "Looking...";
+      try {
+        const res = await fetch("/look", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ image: snapshot() }),
+        });
+        const data = await res.json();
+        answer.textContent = data.text || data.error || "No answer.";
+      } catch (err) {
+        answer.textContent = "Something went wrong: " + err.message;
+      }
+      askBtn.disabled = false;
+    });
+
+    teachBtn.addEventListener("click", async () => {
+      const name = nameInput.value.trim();
+      if (!name) { answer.textContent = "Type a name first, then click Teach this."; return; }
+      teachBtn.disabled = true;
+      answer.textContent = "Teaching Katy '" + name + "'...";
+      try {
+        const res = await fetch("/teach", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ image: snapshot(), name }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          answer.textContent = "Got it — Katy now knows '" + data.name + "'.";
+          nameInput.value = "";
+          refreshKnown();
+        } else {
+          answer.textContent = data.error || "Could not teach that.";
+        }
+      } catch (err) {
+        answer.textContent = "Something went wrong: " + err.message;
+      }
+      teachBtn.disabled = false;
+    });
+
+    refreshKnown();
+  </script>
+</body>
+</html>
