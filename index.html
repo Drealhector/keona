@@ -3,33 +3,44 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Katy — the eye</title>
+  <title>Keona — the eye</title>
   <style>
     body { font-family: system-ui, sans-serif; background: #111; color: #eee; margin: 0; padding: 24px; text-align: center; }
     h1 { font-weight: 700; letter-spacing: 1px; }
     video { width: 100%; max-width: 640px; border-radius: 12px; background: #000; }
     button { font-size: 18px; padding: 14px 22px; margin: 8px 4px; border: 0; border-radius: 10px; background: #ea580c; color: #fff; cursor: pointer; }
     button.teach { background: #0f766e; }
+    button.watch { background: #b91c1c; }
     button:disabled { background: #555; cursor: wait; }
-    input { font-size: 18px; padding: 12px; border-radius: 10px; border: 1px solid #444; background: #1c1c1c; color: #eee; max-width: 260px; }
-    #answer { max-width: 640px; margin: 20px auto 0; font-size: 18px; line-height: 1.5; min-height: 28px; }
-    #known { max-width: 640px; margin: 12px auto 0; font-size: 14px; color: #888; }
+    input[type=text] { font-size: 18px; padding: 12px; border-radius: 10px; border: 1px solid #444; background: #1c1c1c; color: #eee; max-width: 240px; }
+    input[type=file] { color: #ccc; max-width: 280px; }
+    .row { margin: 10px 0; }
+    #answer { max-width: 640px; margin: 18px auto 0; font-size: 18px; line-height: 1.5; min-height: 28px; }
+    #status { max-width: 640px; margin: 8px auto 0; font-size: 15px; color: #fbbf24; min-height: 20px; }
+    #known { max-width: 640px; margin: 10px auto 0; font-size: 14px; color: #888; }
+    #alarm { display: none; position: fixed; top: 0; left: 0; right: 0; padding: 22px; background: #dc2626; color: #fff; font-size: 22px; font-weight: 700; z-index: 10; }
   </style>
 </head>
 <body>
-  <h1>👁️ Katy</h1>
+  <div id="alarm"></div>
+  <h1>👁️ Keona</h1>
   <video id="cam" autoplay playsinline muted></video>
   <canvas id="frame" style="display:none"></canvas>
 
-  <div>
+  <div class="row">
     <button id="ask">What do you see?</button>
   </div>
-  <div>
-    <input id="name" placeholder="name it (e.g. Pepper)" />
+  <div class="row">
+    <input type="text" id="name" placeholder="name it (e.g. Pepper)" />
     <button id="teach" class="teach">Teach this</button>
+  </div>
+  <div class="row">
+    <input type="file" id="target" accept="image/*" />
+    <button id="watch" class="watch">Start watching</button>
   </div>
 
   <div id="answer">Point the camera at something, then click a button.</div>
+  <div id="status"></div>
   <div id="known"></div>
 
   <script>
@@ -38,15 +49,25 @@
     const askBtn = document.getElementById("ask");
     const teachBtn = document.getElementById("teach");
     const nameInput = document.getElementById("name");
+    const watchBtn = document.getElementById("watch");
+    const targetInput = document.getElementById("target");
     const answer = document.getElementById("answer");
+    const status = document.getElementById("status");
     const known = document.getElementById("known");
+    const alarm = document.getElementById("alarm");
 
-    // Turn the camera on (prefers the back camera if there is one).
+    const CHECK_EVERY_MS = 4000;     // how often Keona peeks while watching
+    const ALARM_COOLDOWN_MS = 15000; // don't re-sound the alarm more often than this
+
+    let watching = false;
+    let watchTargetImage = null; // the uploaded photo Keona is hunting for
+    let lastAlarm = 0;
+    let audioCtx = null;
+
     navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
       .then((stream) => { video.srcObject = stream; })
       .catch((err) => { answer.textContent = "Could not open the camera: " + err.message; });
 
-    // Grab one still picture from the live camera.
     function snapshot() {
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
@@ -54,10 +75,37 @@
       return canvas.toDataURL("image/jpeg", 0.7);
     }
 
+    function fileToDataUrl(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    }
+
     async function refreshKnown() {
       const res = await fetch("/known");
       const data = await res.json();
-      known.textContent = data.names.length ? "Katy knows: " + data.names.join(", ") : "Katy hasn't been taught anything yet.";
+      known.textContent = data.names.length ? "Keona knows: " + data.names.join(", ") : "Keona hasn't been taught anything yet.";
+    }
+
+    function beep() {
+      if (!audioCtx) return;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.frequency.value = 880;
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.4);
+    }
+
+    function fireAlarm(reason) {
+      alarm.textContent = "🚨 TARGET SPOTTED — " + reason;
+      alarm.style.display = "block";
+      beep();
+      navigator.vibrate?.([300, 120, 300]);
+      setTimeout(() => { alarm.style.display = "none"; }, 6000);
     }
 
     askBtn.addEventListener("click", async () => {
@@ -81,7 +129,7 @@
       const name = nameInput.value.trim();
       if (!name) { answer.textContent = "Type a name first, then click Teach this."; return; }
       teachBtn.disabled = true;
-      answer.textContent = "Teaching Katy '" + name + "'...";
+      answer.textContent = "Teaching Keona '" + name + "'...";
       try {
         const res = await fetch("/teach", {
           method: "POST",
@@ -90,7 +138,7 @@
         });
         const data = await res.json();
         if (data.ok) {
-          answer.textContent = "Got it — Katy now knows '" + data.name + "'.";
+          answer.textContent = "Got it — Keona now knows '" + data.name + "'.";
           nameInput.value = "";
           refreshKnown();
         } else {
@@ -100,6 +148,44 @@
         answer.textContent = "Something went wrong: " + err.message;
       }
       teachBtn.disabled = false;
+    });
+
+    async function watchTick() {
+      if (!watching) return;
+      try {
+        const res = await fetch("/watch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ image: snapshot(), targetImage: watchTargetImage }),
+        });
+        const data = await res.json();
+        if (data.seen && Date.now() - lastAlarm > ALARM_COOLDOWN_MS) {
+          lastAlarm = Date.now();
+          fireAlarm((data.text || "").split("\n").slice(1).join(" ").trim());
+        }
+        status.textContent = data.seen ? "👀 Target SEEN!" : "watching for your target photo...";
+      } catch (err) {
+        status.textContent = "watch error: " + err.message;
+      }
+      if (watching) setTimeout(watchTick, CHECK_EVERY_MS);
+    }
+
+    watchBtn.addEventListener("click", async () => {
+      if (!watching) {
+        const file = targetInput.files[0];
+        if (!file) { answer.textContent = "Choose a target photo first (use the Choose File button)."; return; }
+        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        audioCtx.resume();
+        watchTargetImage = await fileToDataUrl(file);
+        watching = true;
+        watchBtn.textContent = "Stop watching";
+        status.textContent = "watching for your target photo...";
+        watchTick();
+      } else {
+        watching = false;
+        watchBtn.textContent = "Start watching";
+        status.textContent = "Stopped watching.";
+      }
     });
 
     refreshKnown();

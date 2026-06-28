@@ -22,6 +22,12 @@ async function readJsonBody(req) {
   return JSON.parse(body);
 }
 
+// Pull the media type and raw base64 out of a "data:image/...;base64,..." string.
+function parseDataUrl(dataUrl) {
+  const m = /^data:(image\/[\w.+-]+);base64,(.*)$/s.exec(dataUrl);
+  return m ? { mediaType: m[1], data: m[2] } : { mediaType: "image/jpeg", data: dataUrl.split(",")[1] };
+}
+
 const server = createServer(async (req, res) => {
   // Serve the camera page.
   if (req.method === "GET" && req.url === "/") {
@@ -94,8 +100,40 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  // Auto-watch: does the uploaded TARGET photo appear in the live view RIGHT NOW?
+  if (req.method === "POST" && req.url === "/watch") {
+    try {
+      const { image, targetImage } = await readJsonBody(req);
+      const live = parseDataUrl(image);
+      const target = parseDataUrl(targetImage);
+
+      const content = [
+        { type: "text", text: "TARGET to watch for:" },
+        { type: "image", source: { type: "base64", media_type: target.mediaType, data: target.data } },
+        { type: "text", text: "LIVE VIEW:" },
+        { type: "image", source: { type: "base64", media_type: live.mediaType, data: live.data } },
+        { type: "text", text: "Decide whether the TARGET (first image) appears in the LIVE VIEW (second image). The first line of your reply must be exactly YES or NO — YES only if the target is clearly present in the live view right now. The second line is a short reason." },
+      ];
+
+      const message = await client.messages.create({
+        model: "claude-opus-4-8",
+        max_tokens: 200,
+        messages: [{ role: "user", content }],
+      });
+
+      const text = message.content.find((b) => b.type === "text")?.text ?? "NO";
+      const seen = /^\s*yes\b/i.test(text);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ seen, text }));
+    } catch (err) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
   res.writeHead(404);
   res.end();
 });
 
-server.listen(3000, () => console.log("Katy is awake at http://localhost:3000"));
+server.listen(3000, () => console.log("Keona is awake at http://localhost:3000"));
