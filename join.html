@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Keona — become an eye</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #111; color: #eee; margin: 0; padding: 24px; text-align: center; }
+    video { width: 100%; max-width: 520px; border-radius: 12px; background: #000; }
+    input { font-size: 18px; padding: 12px; border-radius: 10px; border: 1px solid #444; background: #1c1c1c; color: #eee; max-width: 260px; }
+    button { font-size: 18px; padding: 14px 24px; border: 0; border-radius: 10px; background: #0f766e; color: #fff; margin-top: 10px; cursor: pointer; }
+    #status { margin-top: 16px; color: #fbbf24; font-size: 16px; }
+  </style>
+</head>
+<body>
+  <h1>👁️ Become one of Keona's eyes</h1>
+  <video id="cam" autoplay playsinline muted></video>
+  <canvas id="frame" style="display:none"></canvas>
+  <div>
+    <input id="name" placeholder="this eye's name" />
+    <input id="pos" placeholder="position / angle (e.g. facing the street)" />
+    <button id="go">Turn on this eye</button>
+  </div>
+  <div id="status">Name this eye, then turn it on.</div>
+
+  <script>
+    const video = document.getElementById("cam");
+    const canvas = document.getElementById("frame");
+    const status = document.getElementById("status");
+
+    // Best-guess the device so the eye can default to e.g. "Samsung eye".
+    function detectDevice() {
+      const ua = navigator.userAgent;
+      if (/iPhone/.test(ua)) return "iPhone";
+      if (/iPad/.test(ua)) return "iPad";
+      if (/Android/.test(ua)) return (/SamsungBrowser|SM-/.test(ua)) ? "Samsung" : "Android phone";
+      if (/Macintosh|Mac OS X/.test(ua)) return "Mac";
+      if (/Windows/.test(ua)) return "Windows laptop";
+      return "device";
+    }
+    // If the owner pre-named this eye and shared its link (/join?eye=ID), use that id.
+    const presetId = new URLSearchParams(location.search).get("eye");
+
+    let id;
+    if (presetId) {
+      id = presetId;
+      document.getElementById("name").style.display = "none";
+      document.getElementById("pos").style.display = "none";
+    } else {
+      document.getElementById("name").value = detectDevice() + " eye";
+      id = sessionStorage.getItem("eyeId");
+      if (!id) { id = "eye_" + Math.random().toString(36).slice(2, 9); sessionStorage.setItem("eyeId", id); }
+    }
+
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
+      .then((stream) => { video.srcObject = stream; })
+      .catch((err) => { status.textContent = "Couldn't open this eye: " + err.message; });
+
+    function snapshot() {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      canvas.getContext("2d").drawImage(video, 0, 0);
+      return canvas.toDataURL("image/jpeg", 0.6);
+    }
+
+    let on = false, name = "", pos = "";
+    async function tick() {
+      if (!on) return;
+      try {
+        await fetch("/frame", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id, name, pos, image: snapshot() }),
+        });
+        status.textContent = "✅ Live as '" + name + "' — keep this page open.";
+      } catch (err) {
+        status.textContent = "Lost connection, retrying...";
+      }
+      setTimeout(tick, 1500);
+    }
+
+    document.getElementById("go").addEventListener("click", () => {
+      name = document.getElementById("name").value.trim() || (detectDevice() + " eye");
+      pos = document.getElementById("pos").value.trim();
+      if (!on) { on = true; tick(); }
+    });
+  </script>
+</body>
+</html>
