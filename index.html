@@ -52,9 +52,16 @@
     #viewer img { max-width: 92vw; max-height: 78vh; border-radius: 12px; }
     #viewer .vname { font-size: 18px; font-weight: 700; margin-bottom: 10px; }
     #viewer .close { margin-top: 14px; }
+
+    #alarm { display:none; position:fixed; top:0; left:0; right:0; padding:18px; background:#dc2626; color:#fff; font-size:20px; font-weight:700; text-align:center; z-index:30; }
+    .guard { display:flex; align-items:center; gap:8px; padding:8px 10px; background:#0d0d0f; border:1px solid var(--line); border-radius:10px; margin-bottom:6px; }
+    .guard .g-name { flex:1; font-size:14px; }
+    .guard button { background:#7f1d1d; color:#fff; border:0; border-radius:8px; padding:6px 10px; font-size:13px; cursor:pointer; }
+    .alert-item { padding:8px 10px; border-left:3px solid #dc2626; background:#1a0f0f; border-radius:6px; margin-bottom:6px; font-size:14px; }
   </style>
 </head>
 <body>
+  <div id="alarm"></div>
   <h1>👁️ Keona</h1>
   <div class="wrap">
 
@@ -87,6 +94,17 @@
       <h2>Your eyes</h2>
       <div id="emptyEyes">No eyes yet — add one above.</div>
       <div class="grid" id="grid"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Watching for…</h2>
+      <div style="font-size:13px; color:var(--dim); margin-bottom:8px;">Create one in chat: "tell me when you see a phone", "alert me if someone falls".</div>
+      <div id="guardList"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Alerts</h2>
+      <div id="alertFeed" style="font-size:14px; color:var(--dim);">No alerts yet.</div>
     </div>
   </div>
 
@@ -187,7 +205,51 @@
     function openViewer(id, name) { viewing = id; vname.textContent = name; vimg.src = "/frame?id=" + id + "&t=" + Date.now(); viewer.style.display = "flex"; }
     document.getElementById("vclose").addEventListener("click", () => { viewing = null; viewer.style.display = "none"; });
 
-    bubble("Hi, I'm Keona 👁️ Add an eye, then ask me what I see.", "keona");
+    // ---- watching-for list + alerts ----
+    let audioCtx = null;
+    document.addEventListener("click", () => { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }, { once: true });
+    function beep() {
+      if (!audioCtx) return;
+      const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      o.frequency.value = 880; o.connect(g).connect(audioCtx.destination);
+      o.start(); o.stop(audioCtx.currentTime + 0.4);
+    }
+    const alarm = document.getElementById("alarm");
+    const guardList = document.getElementById("guardList");
+    const alertFeed = document.getElementById("alertFeed");
+    let lastAlertId = 0, alertsSeen = false;
+
+    async function pollGuards() {
+      const { guards } = await (await fetch("/guards")).json();
+      if (!guards.length) { guardList.innerHTML = "<div style='color:var(--dim); font-size:13px'>Nothing yet — tell Keona what to watch for.</div>"; return; }
+      guardList.innerHTML = "";
+      for (const g of guards) {
+        const d = document.createElement("div"); d.className = "guard";
+        d.innerHTML = "<span class='g-name'></span><button>stop</button>";
+        d.querySelector(".g-name").textContent = "👁️ " + g.name + (g.targetName ? " — target: " + g.targetName : "");
+        d.querySelector("button").onclick = async () => { await fetch("/guards/stop", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: g.id }) }); pollGuards(); };
+        guardList.appendChild(d);
+      }
+    }
+    async function pollAlerts() {
+      const { alerts } = await (await fetch("/alerts?since=" + lastAlertId)).json();
+      if (!alerts.length) return;
+      for (const a of alerts) {
+        lastAlertId = Math.max(lastAlertId, a.id);
+        const item = document.createElement("div"); item.className = "alert-item";
+        item.textContent = "🚨 " + a.guardName + " — on \"" + a.eyeName + "\" (" + new Date(a.at).toLocaleTimeString() + "): " + a.summary;
+        if (!alertsSeen) { alertFeed.innerHTML = ""; alertsSeen = true; }
+        alertFeed.prepend(item);
+      }
+      const latest = alerts[alerts.length - 1];
+      alarm.textContent = "🚨 " + latest.guardName + " — on " + latest.eyeName;
+      alarm.style.display = "block"; beep(); navigator.vibrate?.([300, 120, 300]);
+      setTimeout(() => { alarm.style.display = "none"; }, 6000);
+    }
+    setInterval(pollGuards, 3000); pollGuards();
+    setInterval(pollAlerts, 3000); pollAlerts();
+
+    bubble("Hi, I'm Keona 👁️ Add an eye, then ask me what I see — or tell me what to watch for.", "keona");
   </script>
 </body>
 </html>

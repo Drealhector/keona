@@ -11,6 +11,12 @@ const ONLINE_MS = 15000;        // an eye is "live" if it sent a frame this rece
 const chat = [];                // recent conversation with Keona: { role, text }
 let eyeCount = 0;
 
+// Pattern engine: standing guards + the alerts they raise.
+const guards = new Map();        // id -> { name, condition, scope, targetName, active, cooldownMs, lastFired }
+let guardCount = 0;
+const alerts = [];               // { id, guardName, eyeName, summary, at }
+let alertCount = 0;
+
 function parseDataUrl(dataUrl) {
   const m = /^data:([^;]+);base64,(.*)$/s.exec(dataUrl);
   return m ? { mimeType: m[1], data: m[2] } : { mimeType: "image/jpeg", data: dataUrl.split(",")[1] };
@@ -30,6 +36,12 @@ async function loadKnown() {
 function send(res, code, obj) {
   res.writeHead(code, { "Content-Type": "application/json" });
   res.end(JSON.stringify(obj));
+}
+async function targetByName(name) {
+  if (!name) return null;
+  const known = await loadKnown();
+  const k = known.find((x) => x.name.toLowerCase() === name.toLowerCase());
+  return k ? `data:image/jpeg;base64,${k.base64}` : null;
 }
 async function page(res, file) {
   res.writeHead(200, { "Content-Type": "text/html" });
@@ -92,6 +104,20 @@ const server = createServer(async (req, res) => {
   if (req.method === "POST" && path === "/chat") {
     try {
       const { message, image } = await readJsonBody(req);
+
+      // Talk-to-guard: "tell me when / alert me if / watch for ..." creates a standing guard.
+      if (message && /\b(tell me|let me know|alert me|notify me|watch|keep watch|look out)\b.*\b(when|if|for)\b/i.test(message)) {
+        const condition = (message.replace(/^.*?\b(when|if|for)\b/i, "").trim()) || message.trim();
+        const knownNames = (await loadKnown()).map((k) => k.name);
+        const targetName = knownNames.find((n) => new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(message)) || null;
+        const id = "g" + (++guardCount);
+        guards.set(id, { name: condition.slice(0, 70), condition, scope: "all", targetName, active: true, cooldownMs: 20000, lastFired: 0 });
+        const reply = `On it — I'm now watching all my eyes and I'll alert you: "${condition}"${targetName ? ` (looking specifically for ${targetName})` : ""}. I'll ping you the moment it happens.`;
+        chat.push({ role: "user", text: message }); chat.push({ role: "assistant", text: reply });
+        if (chat.length > 16) chat.splice(0, chat.length - 16);
+        return send(res, 200, { text: reply, guardCreated: true });
+      }
+
       const parts = [];
       const live = liveEyes();
       for (const [, e] of live) {
@@ -167,8 +193,57 @@ const server = createServer(async (req, res) => {
     } catch (err) { return send(res, 500, { error: err.message }); }
   }
 
+  // Create a standing guard directly.
+  if (req.method === "POST" && path === "/guards") {
+    const { condition, name, scope, targetName } = await readJsonBody(req);
+    if (!condition) return send(res, 400, { error: "condition required" });
+    const id = "g" + (++guardCount);
+    guards.set(id, { name: name || condition, condition, scope: scope || "all", targetName: targetName || null, active: true, cooldownMs: 20000, lastFired: 0 });
+    return send(res, 200, { id });
+  }
+  if (req.method === "GET" && path === "/guards") {
+    return send(res, 200, { guards: [...guards.entries()].filter(([, g]) => g.active).map(([id, g]) => ({ id, name: g.name, condition: g.condition, scope: g.scope, targetName: g.targetName })) });
+  }
+  if (req.method === "POST" && path === "/guards/stop") {
+    const { id } = await readJsonBody(req);
+    guards.delete(id);
+    return send(res, 200, { ok: true });
+  }
+  if (req.method === "GET" && path === "/alerts") {
+    const since = Number(url.searchParams.get("since") || 0);
+    return send(res, 200, { alerts: alerts.filter((a) => a.id > since) });
+  }
+
   res.writeHead(404);
   res.end();
 });
 
 server.listen(3000, () => console.log("Keona is awake at http://localhost:3000  (brain: Gemini 2.5 Pro)"));
+
+// Pattern engine: run ONE full pass over active guards x live eyes, then wait.
+// Self-scheduling (not setInterval) so passes never overlap and pile up on the API.
+const CYCLE_GAP_MS = 8000;
+async function watchCycle() {
+  try {
+    const active = [...guards.values()].filter((g) => g.active);
+    const live = liveEyes();
+    for (const g of active) {
+      const target = await targetByName(g.targetName);
+      for (const [id, e] of live) {
+        if (g.scope && g.scope !== "all" && g.scope !== id) continue;
+        try {
+          const { seen, text } = await brain.checkFrame(e.image, g.condition, target);
+          if (seen && Date.now() - g.lastFired > g.cooldownMs) {
+            g.lastFired = Date.now();
+            const summary = (text || "").split("\n").slice(1).join(" ").trim() || g.condition;
+            alerts.push({ id: ++alertCount, guardName: g.name, eyeName: e.name, summary, at: Date.now() });
+            if (alerts.length > 100) alerts.splice(0, alerts.length - 100);
+          }
+        } catch (err) { console.error(`[watch] check error: ${err.message}`); }
+      }
+    }
+  } finally {
+    setTimeout(watchCycle, CYCLE_GAP_MS);
+  }
+}
+watchCycle();
