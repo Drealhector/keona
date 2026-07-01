@@ -1,8 +1,6 @@
 import { createServer } from "node:http";
 import { readFile, writeFile, readdir, mkdir } from "node:fs/promises";
-import Anthropic from "@anthropic-ai/sdk";
-
-const client = new Anthropic(); // reads ANTHROPIC_API_KEY from the environment
+import * as brain from "./lib/brain.js";
 
 const memoryDir = new URL("./memory/", import.meta.url);
 await mkdir(memoryDir, { recursive: true });
@@ -14,8 +12,8 @@ const chat = [];                // recent conversation with Keona: { role, text 
 let eyeCount = 0;
 
 function parseDataUrl(dataUrl) {
-  const m = /^data:(image\/[\w.+-]+);base64,(.*)$/s.exec(dataUrl);
-  return m ? { mediaType: m[1], data: m[2] } : { mediaType: "image/jpeg", data: dataUrl.split(",")[1] };
+  const m = /^data:([^;]+);base64,(.*)$/s.exec(dataUrl);
+  return m ? { mimeType: m[1], data: m[2] } : { mimeType: "image/jpeg", data: dataUrl.split(",")[1] };
 }
 async function readJsonBody(req) {
   let body = "";
@@ -94,27 +92,23 @@ const server = createServer(async (req, res) => {
   if (req.method === "POST" && path === "/chat") {
     try {
       const { message, image } = await readJsonBody(req);
-      const userContent = [];
-      for (const [, e] of liveEyes()) {
-        const img = parseDataUrl(e.image);
-        userContent.push({ type: "text", text: `(Your eye "${e.name}"${e.pos ? " — " + e.pos : ""} currently sees:)` });
-        userContent.push({ type: "image", source: { type: "base64", media_type: img.mediaType, data: img.data } });
+      const parts = [];
+      const live = liveEyes();
+      for (const [, e] of live) {
+        parts.push(brain.textPart(`(Your eye "${e.name}"${e.pos ? " — " + e.pos : ""} currently sees:)`));
+        parts.push(brain.imagePart(e.image));
       }
       if (image) {
-        const up = parseDataUrl(image);
-        userContent.push({ type: "text", text: "(The owner uploaded this picture:)" });
-        userContent.push({ type: "image", source: { type: "base64", media_type: up.mediaType, data: up.data } });
+        parts.push(brain.textPart("(The owner uploaded this picture:)"));
+        parts.push(brain.imagePart(image));
       }
-      userContent.push({ type: "text", text: message || "(no message)" });
+      if (!live.length && !image) {
+        parts.push(brain.textPart("(You have no eyes open right now, so you genuinely cannot see anything at the moment. Do not invent or guess a scene — say plainly that no eyes are open.)"));
+      }
+      parts.push(brain.textPart(message || "(no message)"));
 
-      const messages = [...chat.map((m) => ({ role: m.role, content: m.text })), { role: "user", content: userContent }];
-      const msg = await client.messages.create({
-        model: "claude-opus-4-8",
-        max_tokens: 700,
-        system: "You are Keona, a warm, friendly AI that sees through the eyes shown to you. You are chatting with your owner like a real person who has eyes. Use what your eyes currently see to answer naturally. If the owner uploads a picture and asks you to look out for it, clearly acknowledge what you'll watch for. Never use the word 'camera' — always say 'eye' or 'eyes'. Be warm, natural, and concise.",
-        messages,
-      });
-      const text = msg.content.find((b) => b.type === "text")?.text ?? "...";
+      const system = "You are Keona, a warm, friendly AI that sees through the eyes shown to you. You are chatting with your owner like a real person who has eyes. Use what your eyes currently see to answer naturally. If the owner uploads a picture and asks you to look out for it, clearly acknowledge what you'll watch for. Never use the word 'camera' — always say 'eye' or 'eyes'. Be warm, natural, and concise.";
+      const text = await brain.converse(chat, parts, system);
       chat.push({ role: "user", text: message || "(sent a picture)" });
       chat.push({ role: "assistant", text });
       if (chat.length > 16) chat.splice(0, chat.length - 16);
@@ -122,21 +116,14 @@ const server = createServer(async (req, res) => {
     } catch (err) { return send(res, 500, { error: err.message }); }
   }
 
-  // Describe one eye (kept for compatibility).
+  // Describe one eye.
   if (req.method === "POST" && path === "/look") {
     try {
       const { id } = await readJsonBody(req);
       const e = eyes.get(id);
       if (!e?.image) return send(res, 404, { error: "that eye is offline" });
-      const live = parseDataUrl(e.image);
-      const msg = await client.messages.create({
-        model: "claude-opus-4-8", max_tokens: 1024,
-        messages: [{ role: "user", content: [
-          { type: "image", source: { type: "base64", media_type: live.mediaType, data: live.data } },
-          { type: "text", text: "In one or two short sentences, plainly describe what you see." },
-        ] }],
-      });
-      return send(res, 200, { text: msg.content.find((b) => b.type === "text")?.text ?? "I couldn't tell." });
+      const text = await brain.analyzeImage(e.image, "In one or two short sentences, plainly describe what you see.");
+      return send(res, 200, { text });
     } catch (err) { return send(res, 500, { error: err.message }); }
   }
 
@@ -145,42 +132,43 @@ const server = createServer(async (req, res) => {
     try {
       const live = liveEyes();
       if (!live.length) return send(res, 200, { text: "I don't have any eyes open right now." });
-      const content = [];
+      const parts = [];
       live.forEach(([, e], i) => {
-        const img = parseDataUrl(e.image);
-        content.push({ type: "text", text: `EYE ${i + 1} — "${e.name}"${e.pos ? " (" + e.pos + ")" : ""}:` });
-        content.push({ type: "image", source: { type: "base64", media_type: img.mediaType, data: img.data } });
+        parts.push(brain.textPart(`EYE ${i + 1} — "${e.name}"${e.pos ? " (" + e.pos + ")" : ""}:`));
+        parts.push(brain.imagePart(e.image));
       });
-      content.push({ type: "text", text: "You are Keona, an AI that sees through these eyes. Speak like a calm person with eyes. Go through each eye by its name and say what it sees in one short sentence. If the same notable thing shows up in more than one eye, point that out. Never use the word 'camera' — always call them your eyes. Keep it clean and natural — no lists, no markdown." });
-      const msg = await client.messages.create({ model: "claude-opus-4-8", max_tokens: 600, messages: [{ role: "user", content }] });
-      return send(res, 200, { text: msg.content.find((b) => b.type === "text")?.text ?? "I couldn't tell." });
+      parts.push(brain.textPart("You are Keona, an AI that sees through these eyes. Speak like a calm person with eyes. Go through each eye by its name and say what it sees in one short sentence. If the same notable thing shows up in more than one eye, point that out. Never use the word 'camera' — always call them your eyes. Keep it clean and natural — no lists, no markdown."));
+      const text = await brain.ask(parts);
+      return send(res, 200, { text });
     } catch (err) { return send(res, 500, { error: err.message }); }
   }
 
-  // Watch one eye for an uploaded target (kept for the continuous-alarm feature).
+  // Watch one eye for an uploaded target.
   if (req.method === "POST" && path === "/watch") {
     try {
       const { id, targetImage } = await readJsonBody(req);
       const e = eyes.get(id);
       if (!e?.image) return send(res, 404, { error: "that eye is offline", seen: false });
-      const live = parseDataUrl(e.image), target = parseDataUrl(targetImage);
-      const msg = await client.messages.create({
-        model: "claude-opus-4-8", max_tokens: 200,
-        messages: [{ role: "user", content: [
-          { type: "text", text: "TARGET to watch for:" },
-          { type: "image", source: { type: "base64", media_type: target.mediaType, data: target.data } },
-          { type: "text", text: "LIVE VIEW:" },
-          { type: "image", source: { type: "base64", media_type: live.mediaType, data: live.data } },
-          { type: "text", text: "Decide whether the TARGET appears in the LIVE VIEW. First line exactly YES or NO. Second line a short reason." },
-        ] }],
-      });
-      const text = msg.content.find((b) => b.type === "text")?.text ?? "NO";
-      return send(res, 200, { seen: /^\s*yes\b/i.test(text), text });
+      const { seen, text } = await brain.watchTarget(e.image, targetImage);
+      return send(res, 200, { seen, text });
     } catch (err) { return send(res, 500, { error: err.message, seen: false }); }
+  }
+
+  // Teach: save one eye's current frame under a name (kept from prototype).
+  if (req.method === "POST" && path === "/teach") {
+    try {
+      const { id, name } = await readJsonBody(req);
+      const e = eyes.get(id);
+      if (!e?.image) return send(res, 404, { error: "that eye is offline" });
+      const safe = String(name).replace(/[^a-zA-Z0-9 _-]/g, "").trim();
+      if (!safe) throw new Error("Please give it a name.");
+      await writeFile(new URL(`${safe}.jpg`, memoryDir), Buffer.from(parseDataUrl(e.image).data, "base64"));
+      return send(res, 200, { ok: true, name: safe });
+    } catch (err) { return send(res, 500, { error: err.message }); }
   }
 
   res.writeHead(404);
   res.end();
 });
 
-server.listen(3000, () => console.log("Keona is awake at http://localhost:3000"));
+server.listen(3000, () => console.log("Keona is awake at http://localhost:3000  (brain: Gemini 2.5 Pro)"));
