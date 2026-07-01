@@ -1,6 +1,10 @@
 import { createServer } from "node:http";
 import { readFile, writeFile, readdir, mkdir } from "node:fs/promises";
+import { ConvexHttpClient } from "convex/browser";
+import { api } from "./convex/_generated/api.js";
 import * as brain from "./lib/brain.js";
+
+const convex = new ConvexHttpClient(process.env.CONVEX_URL);
 
 const memoryDir = new URL("./memory/", import.meta.url);
 await mkdir(memoryDir, { recursive: true });
@@ -10,12 +14,7 @@ const eyes = new Map();
 const ONLINE_MS = 15000;        // an eye is "live" if it sent a frame this recently
 const chat = [];                // recent conversation with Keona: { role, text }
 let eyeCount = 0;
-
-// Pattern engine: standing guards + the alerts they raise.
-const guards = new Map();        // id -> { name, condition, scope, targetName, active, cooldownMs, lastFired }
-let guardCount = 0;
-const alerts = [];               // { id, guardName, eyeName, summary, at }
-let alertCount = 0;
+// Watches (patterns) and alerts now live in Convex (survive restarts).
 
 function parseDataUrl(dataUrl) {
   const m = /^data:([^;]+);base64,(.*)$/s.exec(dataUrl);
@@ -110,8 +109,7 @@ const server = createServer(async (req, res) => {
         const condition = (message.replace(/^.*?\b(when|if|for)\b/i, "").trim()) || message.trim();
         const knownNames = (await loadKnown()).map((k) => k.name);
         const targetName = knownNames.find((n) => new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(message)) || null;
-        const id = "g" + (++guardCount);
-        guards.set(id, { name: condition.slice(0, 70), condition, scope: "all", targetName, active: true, cooldownMs: 20000, lastFired: 0 });
+        await convex.mutation(api.guards.create, { name: condition.slice(0, 70), condition, scope: "all", targetName });
         const reply = `On it — I'm now watching all my eyes and I'll alert you: "${condition}"${targetName ? ` (looking specifically for ${targetName})` : ""}. I'll ping you the moment it happens.`;
         chat.push({ role: "user", text: message }); chat.push({ role: "assistant", text: reply });
         if (chat.length > 16) chat.splice(0, chat.length - 16);
@@ -197,21 +195,20 @@ const server = createServer(async (req, res) => {
   if (req.method === "POST" && path === "/guards") {
     const { condition, name, scope, targetName } = await readJsonBody(req);
     if (!condition) return send(res, 400, { error: "condition required" });
-    const id = "g" + (++guardCount);
-    guards.set(id, { name: name || condition, condition, scope: scope || "all", targetName: targetName || null, active: true, cooldownMs: 20000, lastFired: 0 });
+    const id = await convex.mutation(api.guards.create, { name: name || condition, condition, scope: scope || "all", targetName: targetName || null });
     return send(res, 200, { id });
   }
   if (req.method === "GET" && path === "/guards") {
-    return send(res, 200, { guards: [...guards.entries()].filter(([, g]) => g.active).map(([id, g]) => ({ id, name: g.name, condition: g.condition, scope: g.scope, targetName: g.targetName })) });
+    return send(res, 200, { guards: await convex.query(api.guards.listActive, {}) });
   }
   if (req.method === "POST" && path === "/guards/stop") {
     const { id } = await readJsonBody(req);
-    guards.delete(id);
+    await convex.mutation(api.guards.stop, { id });
     return send(res, 200, { ok: true });
   }
   if (req.method === "GET" && path === "/alerts") {
     const since = Number(url.searchParams.get("since") || 0);
-    return send(res, 200, { alerts: alerts.filter((a) => a.id > since) });
+    return send(res, 200, { alerts: await convex.query(api.alerts.since, { since }) });
   }
 
   res.writeHead(404);
@@ -225,7 +222,7 @@ server.listen(3000, () => console.log("Keona is awake at http://localhost:3000  
 const CYCLE_GAP_MS = 8000;
 async function watchCycle() {
   try {
-    const active = [...guards.values()].filter((g) => g.active);
+    const active = await convex.query(api.guards.listActive, {});
     const live = liveEyes();
     for (const g of active) {
       const target = await targetByName(g.targetName);
@@ -234,10 +231,9 @@ async function watchCycle() {
         try {
           const { seen, text } = await brain.checkFrame(e.image, g.condition, target);
           if (seen && Date.now() - g.lastFired > g.cooldownMs) {
-            g.lastFired = Date.now();
             const summary = (text || "").split("\n").slice(1).join(" ").trim() || g.condition;
-            alerts.push({ id: ++alertCount, guardName: g.name, eyeName: e.name, summary, at: Date.now() });
-            if (alerts.length > 100) alerts.splice(0, alerts.length - 100);
+            await convex.mutation(api.guards.markFired, { id: g.id, at: Date.now() });
+            await convex.mutation(api.alerts.add, { guardName: g.name, eyeName: e.name, summary, at: Date.now() });
           }
         } catch (err) { console.error(`[watch] check error: ${err.message}`); }
       }

@@ -4,10 +4,11 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "start": "node --env-file=.env server.js"
+    "start": "node --env-file=.env --env-file=.env.local server.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.69.0",
-    "@google/genai": "^2.10.0"
+    "@google/genai": "^2.10.0",
+    "convex": "^1.42.1"
   }
 }
