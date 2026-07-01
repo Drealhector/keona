@@ -6,6 +6,10 @@ import * as brain from "./lib/brain.js";
 
 const convex = new ConvexHttpClient(process.env.CONVEX_URL);
 
+// A transient API/network blip must NEVER take Keona down (she watches 24/7).
+process.on("unhandledRejection", (e) => console.error("unhandledRejection:", e?.message || e));
+process.on("uncaughtException", (e) => console.error("uncaughtException:", e?.message || e));
+
 const memoryDir = new URL("./memory/", import.meta.url);
 await mkdir(memoryDir, { recursive: true });
 
@@ -215,7 +219,7 @@ const server = createServer(async (req, res) => {
   res.end();
 });
 
-server.listen(3000, () => console.log("Keona is awake at http://localhost:3000  (brain: Gemini 2.5 Pro)"));
+server.listen(3000, () => console.log("Keona is awake at http://localhost:3000  (brain: Gemini 3 — 3.1 Pro + 3.5 Flash)"));
 
 // Pattern engine: run ONE full pass over active guards x live eyes, then wait.
 // Self-scheduling (not setInterval) so passes never overlap and pile up on the API.
@@ -238,6 +242,8 @@ async function watchCycle() {
         } catch (err) { console.error(`[watch] check error: ${err.message}`); }
       }
     }
+  } catch (err) {
+    console.error("[watch] cycle error:", err?.message || err);
   } finally {
     setTimeout(watchCycle, CYCLE_GAP_MS);
   }
