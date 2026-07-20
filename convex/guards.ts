@@ -70,6 +70,12 @@ export const fire = internalMutation({
       summary: args.summary,
       at: now,
     });
+    // Keona also CHATS the alert, so it lands as a message in the conversation.
+    await ctx.db.insert("conversations", {
+      role: "assistant",
+      text: `🚨 ${g.name} — I just saw it on my "${args.eyeName}" eye: ${args.summary}`,
+      at: now,
+    });
     return true;
   },
 });

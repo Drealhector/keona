@@ -4,7 +4,7 @@
 import type { ActionCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { api, internal } from "./_generated/api";
-import { b64encode, parseDataUrl } from "./b64";
+import { b64decode, b64encode, parseDataUrl } from "./b64";
 
 // Two models, matched to the job:
 const MODEL_SMART = "gemini-3.1-pro-preview"; // chat + deep scene analysis — best reasoning
@@ -55,6 +55,7 @@ export const ask = (parts: Part[], system?: string, model = MODEL_SMART) =>
 type ChatIntent = {
   create?: { condition?: string | null; target?: string | null } | null;
   stop?: "all" | string[] | null;
+  teach?: { name?: string | null; watch?: boolean } | null;
 };
 
 function safeJson(raw: string): ChatIntent | null {
@@ -72,7 +73,7 @@ function safeJson(raw: string): ChatIntent | null {
 export async function chatLogic(
   ctx: ActionCtx,
   args: { message?: string; image?: string },
-): Promise<{ text: string; guardCreated?: boolean }> {
+): Promise<{ text: string; at?: number; guardCreated?: boolean }> {
   const message = args.message ?? "";
   const known: string[] = await ctx.runQuery(api.targets.known, {});
 
@@ -86,17 +87,49 @@ export async function chatLogic(
             `The owner of a watching-eyes assistant said: "${message}"\n` +
               `Known taught target names: ${JSON.stringify(known)}\n` +
               `Currently active watches (exact names): ${JSON.stringify(actives.map((a) => a.name))}\n` +
+              `The owner ${args.image ? "ATTACHED a picture with this message" : "did NOT attach a picture"}.\n` +
               `Decide the owner's intent. They may phrase it any way, in any language:\n` +
-              `- CREATE: they want to START a standing watch that should alert them LATER when something happens.\n` +
+              `- TEACH: they attached a picture of a specific person/thing for me to REMEMBER (e.g. "this is Emeka", "watch for this face", "let me know when you see this person"). Set watch=true if they also want alerts when it appears.\n` +
+              `- CREATE: they want to START a standing watch that should alert them LATER when something happens (no new picture to remember).\n` +
               `- STOP: they want to CANCEL/STOP one or more of the active watches, or stop all watching.\n` +
-              `- NEITHER: greetings, questions about right now, and normal chat.\n` +
-              `Reply with STRICT JSON only: {"create": {"condition": string, "target": string or null} or null, "stop": "all" or [exact names from the active list] or null}\n` +
-              `condition = what to watch for, stated plainly in English. target = one of the known names if the owner meant it, else null.`,
+              `- NEITHER: greetings, questions about right now, and normal chat (including questions ABOUT an attached picture).\n` +
+              `Reply with STRICT JSON only: {"teach": {"name": string or null, "watch": boolean} or null, "create": {"condition": string, "target": string or null} or null, "stop": "all" or [exact names from the active list] or null}\n` +
+              `teach.name = what the owner called the person/thing, else null. condition = what to watch for, stated plainly in English. target = one of the known names if the owner meant it, else null.`,
           ),
         ],
       },
     ]);
     const intent = safeJson(intentRaw);
+
+    if (intent?.teach) {
+      let reply: string;
+      let guardCreated = false;
+      if (!args.image) {
+        reply = "I'd love to memorize that face — attach the picture with your message (the 📎 next to the chat box) and tell me again.";
+      } else {
+        const cleaned = (intent.teach.name ?? "").replace(/[^a-zA-Z0-9 _-]/g, "").trim();
+        const name = cleaned || "Face " + Math.random().toString(36).slice(2, 5);
+        const { mimeType, data } = parseDataUrl(args.image);
+        const storageId = await ctx.storage.store(new Blob([b64decode(data)], { type: mimeType }));
+        await ctx.runMutation(internal.targets.save, { name, storageId });
+        if (intent.teach.watch) {
+          const condition = `the taught person or thing "${name}" is clearly visible`;
+          await ctx.runMutation(api.guards.create, {
+            name: `see ${name}`.slice(0, 70),
+            condition,
+            scope: "all",
+            targetName: name,
+          });
+          guardCreated = true;
+          reply = `Got it — I've memorized this face as "${name}" and all my eyes are watching. The moment ${name} steps into view, I'll chat you right here.`;
+        } else {
+          reply = `Got it — I've memorized this face as "${name}". Say "tell me when you see ${name}" whenever you want me on guard.`;
+        }
+      }
+      await ctx.runMutation(internal.chat.append, { role: "user", text: message || "(sent a picture)" });
+      const at: number = await ctx.runMutation(internal.chat.append, { role: "assistant", text: reply });
+      return { text: reply, at, guardCreated };
+    }
 
     if (intent?.stop) {
       let reply: string;
@@ -117,8 +150,8 @@ export async function chatLogic(
           : "I couldn't match that to any of my active watches — check the Watching for list and try the name shown there.";
       }
       await ctx.runMutation(internal.chat.append, { role: "user", text: message });
-      await ctx.runMutation(internal.chat.append, { role: "assistant", text: reply });
-      return { text: reply };
+      const at: number = await ctx.runMutation(internal.chat.append, { role: "assistant", text: reply });
+      return { text: reply, at };
     }
 
     if (intent?.create?.condition) {
@@ -135,8 +168,8 @@ export async function chatLogic(
         `On it — I'm now watching all my eyes and I'll alert you: "${condition}"` +
         `${targetName ? ` (looking specifically for ${targetName})` : ""}. I'll ping you the moment it happens.`;
       await ctx.runMutation(internal.chat.append, { role: "user", text: message });
-      await ctx.runMutation(internal.chat.append, { role: "assistant", text: reply });
-      return { text: reply, guardCreated: true };
+      const at: number = await ctx.runMutation(internal.chat.append, { role: "assistant", text: reply });
+      return { text: reply, at, guardCreated: true };
     }
   }
 
@@ -168,8 +201,8 @@ export async function chatLogic(
   ];
   const text = await gen(MODEL_SMART, contents, system);
   await ctx.runMutation(internal.chat.append, { role: "user", text: message || "(sent a picture)" });
-  await ctx.runMutation(internal.chat.append, { role: "assistant", text });
-  return { text };
+  const at: number = await ctx.runMutation(internal.chat.append, { role: "assistant", text });
+  return { text, at };
 }
 
 // What do you see across ALL eyes right now? One natural, narrated report.

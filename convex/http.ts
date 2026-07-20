@@ -27,7 +27,7 @@ const http = httpRouter();
 // Register OPTIONS alongside every path so browser preflights always pass.
 const PATHS = [
   "/create-eye", "/frame", "/clip", "/eyes", "/known", "/teach", "/remove-eye",
-  "/chat", "/scene", "/look", "/watch", "/guards", "/guards/stop", "/alerts",
+  "/chat", "/chat-history", "/scene", "/look", "/watch", "/guards", "/guards/stop", "/alerts",
 ];
 for (const path of PATHS) http.route({ path, method: "OPTIONS", handler: preflight });
 
@@ -152,6 +152,20 @@ http.route({
     } catch (err) {
       return json({ error: (err as Error).message }, 500);
     }
+  }),
+});
+
+// Persistent chat feed: no ?since -> last 16; ?since=ts -> newer messages
+// (the control room polls this so Keona's alerts arrive as chat bubbles).
+http.route({
+  path: "/chat-history",
+  method: "GET",
+  handler: httpAction(async (ctx, req) => {
+    const sinceRaw = new URL(req.url).searchParams.get("since");
+    const messages = await ctx.runQuery(api.chat.history, {
+      since: sinceRaw === null ? undefined : Number(sinceRaw),
+    });
+    return json({ messages });
   }),
 });
 

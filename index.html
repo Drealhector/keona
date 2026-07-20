@@ -148,6 +148,9 @@
     document.getElementById("chatImgLabel").addEventListener("click", () => chatImg.click());
     chatImg.addEventListener("change", () => { chatImgName.textContent = chatImg.files[0] ? "📎 " + chatImg.files[0].name : ""; });
 
+    let lastChatAt = 0;     // newest chat message we've already rendered
+    let chatBusy = false;   // pause polling while a send is in flight
+
     async function sendChat() {
       const text = msgInput.value.trim();
       const file = chatImg.files[0];
@@ -155,13 +158,29 @@
       bubble(text || "(sent a picture)", "me");
       msgInput.value = "";
       const thinking = bubble("…", "keona");
+      chatBusy = true;
       try {
         const image = file ? await fileToDataUrl(file) : null;
         const d = await (await fetch(API + "/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: text, image }) })).json();
         thinking.textContent = d.text || d.error || "…";
+        if (d.at) lastChatAt = Math.max(lastChatAt, d.at);
       } catch (err) { thinking.textContent = "Something went wrong: " + err.message; }
+      chatBusy = false;
       chatImg.value = ""; chatImgName.textContent = "";
     }
+
+    // Keona can speak first (alerts land in the conversation), so poll the feed.
+    async function pollChat() {
+      if (chatBusy) return;
+      try {
+        const { messages } = await (await fetch(API + "/chat-history?since=" + lastChatAt)).json();
+        for (const m of messages) {
+          lastChatAt = Math.max(lastChatAt, m.at);
+          bubble(m.text, m.role === "assistant" ? "keona" : "me");
+        }
+      } catch {}
+    }
+    setInterval(pollChat, 3000);
     document.getElementById("send").addEventListener("click", sendChat);
     msgInput.addEventListener("keydown", (e) => { if (e.key === "Enter") sendChat(); });
 
@@ -260,7 +279,16 @@
     setInterval(pollGuards, 3000); pollGuards();
     setInterval(pollAlerts, 3000); pollAlerts();
 
-    bubble("Hi, I'm Keona 👁️ Add an eye, then ask me what I see — or tell me what to watch for.", "keona");
+    // Load the persisted conversation; greet only a truly fresh Keona.
+    (async () => {
+      let rows = [];
+      try { rows = (await (await fetch(API + "/chat-history")).json()).messages || []; } catch {}
+      for (const m of rows) {
+        lastChatAt = Math.max(lastChatAt, m.at);
+        bubble(m.text, m.role === "assistant" ? "keona" : "me");
+      }
+      if (!rows.length) bubble("Hi, I'm Keona 👁️ Add an eye, then ask me what I see — or tell me what to watch for.", "keona");
+    })();
   </script>
 </body>
 </html>
