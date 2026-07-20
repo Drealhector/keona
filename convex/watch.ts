@@ -9,6 +9,7 @@ import { blobPart, checkMedia, imagePart, type Part } from "./brain";
 
 const PASS_GAP_MS = 8000;
 const CLIP_FRESH_MS = 30000;
+const MOTION_FRESH_MS = 20000; // quiet eyes (no movement this recently) are skipped
 
 export const minute = internalAction({
   args: {},
@@ -41,10 +42,15 @@ export const pass = internalAction({
       }
       for (const e of eyes) {
         if (g.scope && g.scope !== "all" && g.scope !== e.eyeId) continue;
+        // Quiet scene = no Gemini call. motionAt null means an older eye page
+        // that can't report motion — check those the old way to stay correct.
+        const clipFresh = e.clipId !== null && Date.now() - e.clipAt < CLIP_FRESH_MS;
+        const motionFresh = e.motionAt === null || Date.now() - e.motionAt < MOTION_FRESH_MS;
+        if (!clipFresh && !motionFresh) continue;
         try {
           // Prefer a fresh clip (real motion over time); fall back to the frame.
           let media: Part = imagePart(e.frame);
-          if (e.clipId && Date.now() - e.clipAt < CLIP_FRESH_MS) {
+          if (clipFresh && e.clipId) {
             const blob = await ctx.storage.get(e.clipId);
             if (blob) media = await blobPart(blob, "video/webm");
           }

@@ -26,7 +26,7 @@ const http = httpRouter();
 
 // Register OPTIONS alongside every path so browser preflights always pass.
 const PATHS = [
-  "/create-eye", "/frame", "/clip", "/eyes", "/known", "/teach",
+  "/create-eye", "/frame", "/clip", "/eyes", "/known", "/teach", "/remove-eye",
   "/chat", "/scene", "/look", "/watch", "/guards", "/guards/stop", "/alerts",
 ];
 for (const path of PATHS) http.route({ path, method: "OPTIONS", handler: preflight });
@@ -84,6 +84,18 @@ http.route({
     if (blob.size === 0) return json({ error: "empty clip" }, 400);
     const storageId = await ctx.storage.store(blob);
     await ctx.runMutation(api.eyes.setClip, { eyeId, storageId });
+    return json({ ok: true });
+  }),
+});
+
+// Remove an eye completely (card, stored clip, everything).
+http.route({
+  path: "/remove-eye",
+  method: "POST",
+  handler: httpAction(async (ctx, req) => {
+    const { id } = await req.json();
+    if (!id) return json({ error: "id required" }, 400);
+    await ctx.runMutation(api.eyes.remove, { eyeId: String(id) });
     return json({ ok: true });
   }),
 });

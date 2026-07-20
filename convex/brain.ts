@@ -2,6 +2,7 @@
 // runs in the default Convex runtime. Plain helper functions (not registered
 // Convex functions): http.ts and watch.ts call these directly with their ctx.
 import type { ActionCtx } from "./_generated/server";
+import type { Id } from "./_generated/dataModel";
 import { api, internal } from "./_generated/api";
 import { b64encode, parseDataUrl } from "./b64";
 
@@ -51,7 +52,12 @@ async function gen(model: string, contents: Turn[], system?: string): Promise<st
 export const ask = (parts: Part[], system?: string, model = MODEL_SMART) =>
   gen(model, [{ role: "user", parts }], system);
 
-function safeJson(raw: string): { watch?: boolean; condition?: string | null; target?: string | null } | null {
+type ChatIntent = {
+  create?: { condition?: string | null; target?: string | null } | null;
+  stop?: "all" | string[] | null;
+};
+
+function safeJson(raw: string): ChatIntent | null {
   try {
     const m = /\{[\s\S]*\}/.exec(raw); // tolerate ```json fences or prose around it
     return m ? JSON.parse(m[0]) : null;
@@ -71,6 +77,7 @@ export async function chatLogic(
   const known: string[] = await ctx.runQuery(api.targets.known, {});
 
   if (message) {
+    const actives: Array<{ id: Id<"patterns">; name: string }> = await ctx.runQuery(api.guards.listActive, {});
     const intentRaw = await gen(MODEL_FAST, [
       {
         role: "user",
@@ -78,18 +85,46 @@ export async function chatLogic(
           textPart(
             `The owner of a watching-eyes assistant said: "${message}"\n` +
               `Known taught target names: ${JSON.stringify(known)}\n` +
-              `Decide: is the owner asking to START a standing watch that should alert them LATER when something happens? ` +
-              `They may phrase it any way, in any language. Questions about right now, greetings, and normal chat are NOT watch requests.\n` +
-              `Reply with STRICT JSON only: {"watch": boolean, "condition": string or null, "target": string or null}\n` +
+              `Currently active watches (exact names): ${JSON.stringify(actives.map((a) => a.name))}\n` +
+              `Decide the owner's intent. They may phrase it any way, in any language:\n` +
+              `- CREATE: they want to START a standing watch that should alert them LATER when something happens.\n` +
+              `- STOP: they want to CANCEL/STOP one or more of the active watches, or stop all watching.\n` +
+              `- NEITHER: greetings, questions about right now, and normal chat.\n` +
+              `Reply with STRICT JSON only: {"create": {"condition": string, "target": string or null} or null, "stop": "all" or [exact names from the active list] or null}\n` +
               `condition = what to watch for, stated plainly in English. target = one of the known names if the owner meant it, else null.`,
           ),
         ],
       },
     ]);
     const intent = safeJson(intentRaw);
-    if (intent?.watch && intent.condition) {
-      const condition = intent.condition;
-      const targetName = intent.target && known.includes(intent.target) ? intent.target : null;
+
+    if (intent?.stop) {
+      let reply: string;
+      if (!actives.length) {
+        reply = "I wasn't watching for anything, so we're already clear — nothing is burning.";
+      } else {
+        const wanted =
+          intent.stop === "all"
+            ? actives
+            : actives.filter((a) =>
+                (intent.stop as string[]).some((n) => n.toLowerCase() === a.name.toLowerCase()),
+              );
+        for (const g of wanted) {
+          await ctx.runMutation(api.guards.stop, { id: g.id });
+        }
+        reply = wanted.length
+          ? `Done — I've stopped watching: ${wanted.map((g) => `"${g.name}"`).join(", ")}. My eyes stay open, but I'm off guard duty${wanted.length === actives.length ? " completely, so nothing is burning" : " for those"}.`
+          : "I couldn't match that to any of my active watches — check the Watching for list and try the name shown there.";
+      }
+      await ctx.runMutation(internal.chat.append, { role: "user", text: message });
+      await ctx.runMutation(internal.chat.append, { role: "assistant", text: reply });
+      return { text: reply };
+    }
+
+    if (intent?.create?.condition) {
+      const condition = intent.create.condition;
+      const targetName =
+        intent.create.target && known.includes(intent.create.target) ? intent.create.target : null;
       await ctx.runMutation(api.guards.create, {
         name: condition.slice(0, 70),
         condition,

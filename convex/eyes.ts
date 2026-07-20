@@ -28,6 +28,7 @@ export const reportFrame = mutation({
     name: v.optional(v.string()),
     pos: v.optional(v.string()),
     frame: v.string(),
+    moving: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
@@ -35,6 +36,9 @@ export const reportFrame = mutation({
       .query("eyes")
       .withIndex("by_eyeId", (q) => q.eq("eyeId", args.eyeId))
       .unique();
+    // moving === false -> quiet heartbeat, keep the old motion stamp.
+    // moving === true or undefined (older eye pages) -> count as movement now.
+    const motionAt = args.moving === false ? (existing?.motionAt ?? 0) : now;
     if (existing) {
       await ctx.db.patch("eyes", existing._id, {
         name: existing.name || args.name || "Eye",
@@ -43,6 +47,7 @@ export const reportFrame = mutation({
         frameAt: now,
         lastSeen: now,
         online: true,
+        motionAt,
       });
     } else {
       // Device self-joined via /join without a pre-created slot.
@@ -54,6 +59,7 @@ export const reportFrame = mutation({
         frameAt: now,
         lastSeen: now,
         online: true,
+        motionAt,
       });
     }
     const anyGuard = await ctx.db
@@ -79,6 +85,21 @@ export const setClip = mutation({
     }
     if (eye.clipId) await ctx.storage.delete(eye.clipId);
     await ctx.db.patch("eyes", eye._id, { clipId: args.storageId, clipAt: Date.now() });
+    return null;
+  },
+});
+
+// Remove an eye completely: its card, its stored clip, everything.
+export const remove = mutation({
+  args: { eyeId: v.string() },
+  handler: async (ctx, args) => {
+    const eye = await ctx.db
+      .query("eyes")
+      .withIndex("by_eyeId", (q) => q.eq("eyeId", args.eyeId))
+      .unique();
+    if (!eye) return null;
+    if (eye.clipId) await ctx.storage.delete(eye.clipId);
+    await ctx.db.delete(eye._id);
     return null;
   },
 });
@@ -124,6 +145,7 @@ export const live = internalQuery({
         frame: e.frame as string,
         clipId: e.clipId ?? null,
         clipAt: e.clipAt ?? 0,
+        motionAt: e.motionAt ?? null, // null = older doc, motion unknown
       }));
   },
 });

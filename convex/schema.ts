@@ -20,6 +20,7 @@ export default defineSchema({
     frameAt: v.optional(v.number()),
     clipId: v.optional(v.id("_storage")), // latest ~8s clip (old file deleted on replace)
     clipAt: v.optional(v.number()),
+    motionAt: v.optional(v.number()),     // last time the eye reported real movement
   }).index("by_eyeId", ["eyeId"]),
 
   // "Watching for..." — the standing guards / pattern engine.

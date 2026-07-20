@@ -136,11 +136,11 @@
     let lastSentAt = 0;
     const HEARTBEAT_MS = 12000; // still scene: one frame every 12s keeps the eye "live"
 
-    async function sendFrame() {
+    async function sendFrame(moving) {
       const r = await fetch(API + "/frame", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id, name, pos, image: snapshot() }),
+        body: JSON.stringify({ id, name, pos, image: snapshot(), moving: !!moving }),
       });
       lastSentAt = Date.now();
       const d = await r.json().catch(() => ({}));
@@ -154,7 +154,7 @@
         const moving = score > MOTION_THRESHOLD;
         if (moving) lastMotionAt = Date.now();
         if (moving || Date.now() - lastSentAt > HEARTBEAT_MS) {
-          await sendFrame();
+          await sendFrame(moving);
           maybeRecord();
           status.textContent = moving
             ? "✅ Live as '" + name + "' — movement, sending" + (guardsActive ? " + clips (guards on)" : "")
