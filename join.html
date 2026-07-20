@@ -9,6 +9,7 @@
     video { width: 100%; max-width: 520px; border-radius: 12px; background: #000; }
     input { font-size: 18px; padding: 12px; border-radius: 10px; border: 1px solid #444; background: #1c1c1c; color: #eee; max-width: 260px; }
     button { font-size: 18px; padding: 14px 24px; border: 0; border-radius: 10px; background: #0f766e; color: #fff; margin-top: 10px; cursor: pointer; }
+    button.closed { background: #7f1d1d; }
     #status { margin-top: 16px; color: #fbbf24; font-size: 16px; }
   </style>
 </head>
@@ -20,9 +21,9 @@
   <div>
     <input id="name" placeholder="this eye's name" />
     <input id="pos" placeholder="position / angle (e.g. facing the street)" />
-    <button id="go">Turn on this eye</button>
   </div>
-  <div id="status">Name this eye, then turn it on.</div>
+  <button id="toggle">Close this eye</button>
+  <div id="status">Opening this eye…</div>
 
   <script>
     // Keona's backend lives on Convex; this page is static (Vercel).
@@ -32,6 +33,9 @@
     const canvas = document.getElementById("frame");
     const motionCanvas = document.getElementById("motion");
     const status = document.getElementById("status");
+    const toggleBtn = document.getElementById("toggle");
+    const nameInput = document.getElementById("name");
+    const posInput = document.getElementById("pos");
 
     // Best-guess the device so the eye can default to e.g. "Samsung eye".
     function detectDevice() {
@@ -49,18 +53,16 @@
     let id;
     if (presetId) {
       id = presetId;
-      document.getElementById("name").style.display = "none";
-      document.getElementById("pos").style.display = "none";
+      nameInput.style.display = "none";
+      posInput.style.display = "none";
     } else {
-      document.getElementById("name").value = detectDevice() + " eye";
+      nameInput.value = detectDevice() + " eye";
       id = sessionStorage.getItem("eyeId");
       if (!id) { id = "eye_" + Math.random().toString(36).slice(2, 9); sessionStorage.setItem("eyeId", id); }
     }
-
-    let stream = null;
-    navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: { ideal: 640 } } })
-      .then((s) => { stream = s; video.srcObject = s; })
-      .catch((err) => { status.textContent = "Couldn't open this eye: " + err.message; });
+    // Pre-set slots keep their name; self-joined eyes read the field live.
+    const eyeName = () => (presetId ? "" : (nameInput.value.trim() || detectDevice() + " eye"));
+    const eyePos = () => (presetId ? "" : posInput.value.trim());
 
     function snapshot() {
       canvas.width = video.videoWidth;
@@ -110,7 +112,7 @@
       recorder.onstop = async () => {
         recording = false;
         const blob = new Blob(chunks, { type: recorder.mimeType || "video/webm" });
-        if (blob.size > 0 && blob.size < 8_000_000) {
+        if (on && blob.size > 0 && blob.size < 8_000_000) {
           try {
             await fetch(API + "/clip?eye=" + encodeURIComponent(id), {
               method: "POST",
@@ -125,22 +127,35 @@
       setTimeout(() => { if (recorder && recorder.state === "recording") recorder.stop(); }, 8000);
     }
     function maybeRecord() {
-      const needClips = guardsActive && Date.now() - lastMotionAt < 12000;
+      const needClips = on && guardsActive && Date.now() - lastMotionAt < 12000;
       if (needClips) startClip();
     }
 
-    // ---- main tick: motion decides whether to spend bandwidth ----
-    let on = false, name = "", pos = "";
+    // ---- open / close: a real eye, on the moment the device approves ----
+    let stream = null;
+    let on = false;
     let guardsActive = false;
     let lastMotionAt = 0;
     let lastSentAt = 0;
-    const HEARTBEAT_MS = 12000; // still scene: one frame every 12s keeps the eye "live"
+    let fastUntil = 0;          // full-speed period right after opening
+    const HEARTBEAT_MS = 12000; // still scene: one frame every 12s keeps the eye alive
+    const FAST_MS = 10000;      // first 10s always full speed so she appears instantly
+
+    async function acquireCamera() {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: { ideal: 640 } } });
+      video.srcObject = stream;
+      // Wait until the camera actually produces frames — never send blind pictures.
+      await new Promise((res) => {
+        if (video.readyState >= 2 && video.videoWidth) return res();
+        video.addEventListener("loadeddata", res, { once: true });
+      });
+    }
 
     async function sendFrame(moving) {
       const r = await fetch(API + "/frame", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id, name, pos, image: snapshot(), moving: !!moving }),
+        body: JSON.stringify({ id, name: eyeName(), pos: eyePos(), image: snapshot(), moving: !!moving }),
       });
       lastSentAt = Date.now();
       const d = await r.json().catch(() => ({}));
@@ -153,26 +168,61 @@
         const score = motionScore();
         const moving = score > MOTION_THRESHOLD;
         if (moving) lastMotionAt = Date.now();
-        if (moving || Date.now() - lastSentAt > HEARTBEAT_MS) {
-          await sendFrame(moving);
+        const fast = Date.now() < fastUntil;
+        if (moving || fast || Date.now() - lastSentAt > HEARTBEAT_MS) {
+          await sendFrame(moving || fast);
           maybeRecord();
-          status.textContent = moving
-            ? "✅ Live as '" + name + "' — movement, sending" + (guardsActive ? " + clips (guards on)" : "")
-            : "✅ Live as '" + name + "' — quiet scene, saving data";
-        } else {
-          status.textContent = "✅ Live as '" + name + "' — quiet scene, saving data";
         }
+        const label = presetId ? "" : " as '" + eyeName() + "'";
+        status.textContent = moving || fast
+          ? "✅ Eye open" + label + " — watching" + (guardsActive ? " + clips (guards on)" : "")
+          : "✅ Eye open" + label + " — quiet scene, saving data";
       } catch (err) {
         status.textContent = "Lost connection, retrying...";
       }
       setTimeout(tick, 1500);
     }
 
-    document.getElementById("go").addEventListener("click", () => {
-      name = document.getElementById("name").value.trim() || (detectDevice() + " eye");
-      pos = document.getElementById("pos").value.trim();
-      if (!on) { on = true; lastSentAt = 0; tick(); }
+    async function openEye() {
+      if (on) return;
+      try {
+        status.textContent = "Opening this eye…";
+        if (!stream) await acquireCamera();
+        on = true;
+        prevGray = null;
+        lastSentAt = 0;
+        fastUntil = Date.now() + FAST_MS;
+        toggleBtn.textContent = "Close this eye";
+        toggleBtn.classList.remove("closed");
+        tick();
+      } catch (err) {
+        status.textContent = "Couldn't open this eye: " + err.message;
+      }
+    }
+
+    function closeEye() {
+      on = false;
+      guardsActive = false;
+      toggleBtn.textContent = "Open this eye";
+      toggleBtn.classList.add("closed");
+      status.textContent = "Eye closed.";
+      try { if (recorder && recorder.state === "recording") recorder.stop(); } catch {}
+      try { stream?.getTracks().forEach((t) => t.stop()); } catch {}
+      stream = null;
+      video.srcObject = null;
+      // Tell Keona instantly, so the control room greys out this second.
+      try { fetch(API + "/eye-off", { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({ id }) }); } catch {}
+    }
+
+    toggleBtn.addEventListener("click", () => { on ? closeEye() : openEye(); });
+
+    // Closing the tab or leaving the page also closes the eye immediately.
+    window.addEventListener("pagehide", () => {
+      if (on) navigator.sendBeacon(API + "/eye-off", JSON.stringify({ id }));
     });
+
+    // A real eye: open the page, approve the camera, and she's watching.
+    openEye();
   </script>
 </body>
 </html>

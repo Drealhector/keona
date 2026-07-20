@@ -1,7 +1,9 @@
 import { internalQuery, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 
-const ONLINE_MS = 15000; // an eye is "live" if it sent a frame this recently
+const ONLINE_MS = 30000; // an eye is "live" if it sent a frame this recently
+// (30s of patience so a quiet eye's 12s heartbeats never flicker it offline;
+// explicit close is instant via goOffline)
 
 // Create a named eye slot up front, then share its /join?eye=ID link.
 export const create = mutation({
@@ -85,6 +87,19 @@ export const setClip = mutation({
     }
     if (eye.clipId) await ctx.storage.delete(eye.clipId);
     await ctx.db.patch("eyes", eye._id, { clipId: args.storageId, clipAt: Date.now() });
+    return null;
+  },
+});
+
+// The device closed its eye (button or page closed): grey out instantly.
+export const goOffline = mutation({
+  args: { eyeId: v.string() },
+  handler: async (ctx, args) => {
+    const eye = await ctx.db
+      .query("eyes")
+      .withIndex("by_eyeId", (q) => q.eq("eyeId", args.eyeId))
+      .unique();
+    if (eye) await ctx.db.patch("eyes", eye._id, { online: false, lastSeen: 0 });
     return null;
   },
 });

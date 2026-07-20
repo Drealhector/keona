@@ -26,7 +26,7 @@ const http = httpRouter();
 
 // Register OPTIONS alongside every path so browser preflights always pass.
 const PATHS = [
-  "/create-eye", "/frame", "/clip", "/eyes", "/known", "/teach", "/remove-eye",
+  "/create-eye", "/frame", "/clip", "/eyes", "/known", "/teach", "/remove-eye", "/eye-off",
   "/chat", "/chat-history", "/scene", "/look", "/watch", "/guards", "/guards/stop", "/alerts",
 ];
 for (const path of PATHS) http.route({ path, method: "OPTIONS", handler: preflight });
@@ -84,6 +84,20 @@ http.route({
     if (blob.size === 0) return json({ error: "empty clip" }, 400);
     const storageId = await ctx.storage.store(blob);
     await ctx.runMutation(api.eyes.setClip, { eyeId, storageId });
+    return json({ ok: true });
+  }),
+});
+
+// The device says its eye closed (button / tab closed). Body may arrive as
+// text/plain (sendBeacon), so parse the text loosely.
+http.route({
+  path: "/eye-off",
+  method: "POST",
+  handler: httpAction(async (ctx, req) => {
+    let id = "";
+    try { id = String(JSON.parse(await req.text())?.id ?? ""); } catch {}
+    if (!id) return json({ error: "id required" }, 400);
+    await ctx.runMutation(api.eyes.goOffline, { eyeId: id });
     return json({ ok: true });
   }),
 });
