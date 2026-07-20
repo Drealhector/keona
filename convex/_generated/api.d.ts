@@ -9,7 +9,15 @@
  */
 
 import type * as alerts from "../alerts.js";
+import type * as b64 from "../b64.js";
+import type * as brain from "../brain.js";
+import type * as chat from "../chat.js";
+import type * as crons from "../crons.js";
+import type * as eyes from "../eyes.js";
 import type * as guards from "../guards.js";
+import type * as http from "../http.js";
+import type * as targets from "../targets.js";
+import type * as watch from "../watch.js";
 
 import type {
   ApiFromModules,
@@ -19,7 +27,15 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   alerts: typeof alerts;
+  b64: typeof b64;
+  brain: typeof brain;
+  chat: typeof chat;
+  crons: typeof crons;
+  eyes: typeof eyes;
   guards: typeof guards;
+  http: typeof http;
+  targets: typeof targets;
+  watch: typeof watch;
 }>;
 
 /**

@@ -115,6 +115,9 @@
   </div>
 
   <script>
+    // Keona's backend lives on Convex; the pages are static (Vercel).
+    const API = "https://industrious-chipmunk-949.convex.site";
+
     const messages = document.getElementById("messages");
     const msgInput = document.getElementById("msg");
     const chatImg = document.getElementById("chatImg");
@@ -152,7 +155,7 @@
       const thinking = bubble("…", "keona");
       try {
         const image = file ? await fileToDataUrl(file) : null;
-        const d = await (await fetch("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: text, image }) })).json();
+        const d = await (await fetch(API + "/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: text, image }) })).json();
         thinking.textContent = d.text || d.error || "…";
       } catch (err) { thinking.textContent = "Something went wrong: " + err.message; }
       chatImg.value = ""; chatImgName.textContent = "";
@@ -165,7 +168,7 @@
       const name = document.getElementById("newName").value.trim();
       const pos = document.getElementById("newPos").value.trim();
       if (!name) { alert("Give the eye a name first."); return; }
-      const d = await (await fetch("/create-eye", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, pos }) })).json();
+      const d = await (await fetch(API + "/create-eye", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, pos }) })).json();
       const link = location.origin + "/join?eye=" + d.id;
       document.getElementById("linkField").value = link;
       document.getElementById("linkOut").style.display = "block";
@@ -177,7 +180,7 @@
     // ---- eyes grid ----
     const cards = {};
     async function refresh() {
-      const { eyes } = await (await fetch("/eyes")).json();
+      const { eyes } = await (await fetch(API + "/eyes")).json();
       emptyEyes.style.display = eyes.length ? "none" : "block";
       const ids = new Set(eyes.map((e) => e.id));
       for (const id in cards) { if (!ids.has(id)) { cards[id].root.remove(); delete cards[id]; } }
@@ -194,15 +197,15 @@
         }
         const c = cards[e.id];
         c.dot.className = "dot" + (e.online ? " on" : "");
-        if (e.online) c.view.innerHTML = "<img src='/frame?id=" + e.id + "&t=" + Date.now() + "'>";
+        if (e.online) c.view.innerHTML = "<img src='" + API + "/frame?id=" + e.id + "&t=" + Date.now() + "'>";
         else c.view.innerHTML = "<div class='waiting'>waiting to go live…</div>";
       }
-      if (viewing && ids.has(viewing)) vimg.src = "/frame?id=" + viewing + "&t=" + Date.now();
+      if (viewing && ids.has(viewing)) vimg.src = API + "/frame?id=" + viewing + "&t=" + Date.now();
     }
     setInterval(refresh, 2000); refresh();
 
     // ---- viewer ----
-    function openViewer(id, name) { viewing = id; vname.textContent = name; vimg.src = "/frame?id=" + id + "&t=" + Date.now(); viewer.style.display = "flex"; }
+    function openViewer(id, name) { viewing = id; vname.textContent = name; vimg.src = API + "/frame?id=" + id + "&t=" + Date.now(); viewer.style.display = "flex"; }
     document.getElementById("vclose").addEventListener("click", () => { viewing = null; viewer.style.display = "none"; });
 
     // ---- watching-for list + alerts ----
@@ -220,19 +223,19 @@
     let lastAlertId = 0, alertsSeen = false;
 
     async function pollGuards() {
-      const { guards } = await (await fetch("/guards")).json();
+      const { guards } = await (await fetch(API + "/guards")).json();
       if (!guards.length) { guardList.innerHTML = "<div style='color:var(--dim); font-size:13px'>Nothing yet — tell Keona what to watch for.</div>"; return; }
       guardList.innerHTML = "";
       for (const g of guards) {
         const d = document.createElement("div"); d.className = "guard";
         d.innerHTML = "<span class='g-name'></span><button>stop</button>";
         d.querySelector(".g-name").textContent = "👁️ " + g.name + (g.targetName ? " — target: " + g.targetName : "");
-        d.querySelector("button").onclick = async () => { await fetch("/guards/stop", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: g.id }) }); pollGuards(); };
+        d.querySelector("button").onclick = async () => { await fetch(API + "/guards/stop", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: g.id }) }); pollGuards(); };
         guardList.appendChild(d);
       }
     }
     async function pollAlerts() {
-      const { alerts } = await (await fetch("/alerts?since=" + lastAlertId)).json();
+      const { alerts } = await (await fetch(API + "/alerts?since=" + lastAlertId)).json();
       if (!alerts.length) return;
       for (const a of alerts) {
         lastAlertId = Math.max(lastAlertId, a.id);

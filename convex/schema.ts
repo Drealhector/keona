@@ -1,8 +1,8 @@
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 
-// Keona's persistent memory. Live camera frames stay in the Node server (RAM);
-// Convex holds the durable data: eyes, watches, alerts, history, taught targets.
+// Keona's persistent memory. Since the move off localhost, Convex holds EVERYTHING:
+// eyes (with their latest frame + clip), watches, alerts, taught targets, chat history.
 export default defineSchema({
   devices: defineTable({
     name: v.string(),
@@ -16,6 +16,10 @@ export default defineSchema({
     pos: v.optional(v.string()),     // position / angle label
     online: v.boolean(),
     lastSeen: v.number(),
+    frame: v.optional(v.string()),   // latest snapshot as a data URL (replaced in place)
+    frameAt: v.optional(v.number()),
+    clipId: v.optional(v.id("_storage")), // latest ~8s clip (old file deleted on replace)
+    clipAt: v.optional(v.number()),
   }).index("by_eyeId", ["eyeId"]),
 
   // "Watching for..." — the standing guards / pattern engine.

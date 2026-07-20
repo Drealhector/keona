@@ -16,6 +16,7 @@
   <h1>👁️ Become one of Keona's eyes</h1>
   <video id="cam" autoplay playsinline muted></video>
   <canvas id="frame" style="display:none"></canvas>
+  <canvas id="motion" style="display:none"></canvas>
   <div>
     <input id="name" placeholder="this eye's name" />
     <input id="pos" placeholder="position / angle (e.g. facing the street)" />
@@ -24,8 +25,12 @@
   <div id="status">Name this eye, then turn it on.</div>
 
   <script>
+    // Keona's backend lives on Convex; this page is static (Vercel).
+    const API = "https://industrious-chipmunk-949.convex.site";
+
     const video = document.getElementById("cam");
     const canvas = document.getElementById("frame");
+    const motionCanvas = document.getElementById("motion");
     const status = document.getElementById("status");
 
     // Best-guess the device so the eye can default to e.g. "Samsung eye".
@@ -52,8 +57,9 @@
       if (!id) { id = "eye_" + Math.random().toString(36).slice(2, 9); sessionStorage.setItem("eyeId", id); }
     }
 
-    navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
-      .then((stream) => { video.srcObject = stream; })
+    let stream = null;
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: { ideal: 640 } } })
+      .then((s) => { stream = s; video.srcObject = s; })
       .catch((err) => { status.textContent = "Couldn't open this eye: " + err.message; });
 
     function snapshot() {
@@ -63,16 +69,99 @@
       return canvas.toDataURL("image/jpeg", 0.6);
     }
 
+    // ---- free motion gate: compare a tiny grayscale version of each frame ----
+    // Still scene => nothing uploaded (just a rare heartbeat) => zero cost.
+    let prevGray = null;
+    const MOTION_THRESHOLD = 7;   // mean brightness change (0-255) that counts as motion
+    function motionScore() {
+      if (!video.videoWidth) return 0;
+      const w = 48, h = 36;
+      motionCanvas.width = w; motionCanvas.height = h;
+      const g = motionCanvas.getContext("2d", { willReadFrequently: true });
+      g.drawImage(video, 0, 0, w, h);
+      const px = g.getImageData(0, 0, w, h).data;
+      const gray = new Float32Array(w * h);
+      for (let i = 0; i < w * h; i++) gray[i] = (px[i * 4] + px[i * 4 + 1] + px[i * 4 + 2]) / 3;
+      if (!prevGray) { prevGray = gray; return 0; }
+      let sum = 0;
+      for (let i = 0; i < gray.length; i++) sum += Math.abs(gray[i] - prevGray[i]);
+      prevGray = gray;
+      return sum / gray.length;
+    }
+
+    // ---- clip recorder: standalone ~8s clips while motion + guards are on ----
+    // (stop/restart per clip so every upload is an independently playable file)
+    let recorder = null, recording = false;
+    function pickMime() {
+      for (const m of ["video/webm;codecs=vp8", "video/webm", "video/mp4"]) {
+        if (window.MediaRecorder && MediaRecorder.isTypeSupported(m)) return m;
+      }
+      return "";
+    }
+    function startClip() {
+      if (recording || !stream || !window.MediaRecorder) return;
+      const mime = pickMime();
+      try {
+        recorder = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: 500000 } : undefined);
+      } catch { recorder = null; return; }
+      recording = true;
+      const chunks = [];
+      recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+      recorder.onstop = async () => {
+        recording = false;
+        const blob = new Blob(chunks, { type: recorder.mimeType || "video/webm" });
+        if (blob.size > 0 && blob.size < 8_000_000) {
+          try {
+            await fetch(API + "/clip?eye=" + encodeURIComponent(id), {
+              method: "POST",
+              headers: { "Content-Type": blob.type || "video/webm" },
+              body: blob,
+            });
+          } catch {}
+        }
+        maybeRecord(); // roll straight into the next clip if still needed
+      };
+      recorder.start();
+      setTimeout(() => { if (recorder && recorder.state === "recording") recorder.stop(); }, 8000);
+    }
+    function maybeRecord() {
+      const needClips = guardsActive && Date.now() - lastMotionAt < 12000;
+      if (needClips) startClip();
+    }
+
+    // ---- main tick: motion decides whether to spend bandwidth ----
     let on = false, name = "", pos = "";
+    let guardsActive = false;
+    let lastMotionAt = 0;
+    let lastSentAt = 0;
+    const HEARTBEAT_MS = 12000; // still scene: one frame every 12s keeps the eye "live"
+
+    async function sendFrame() {
+      const r = await fetch(API + "/frame", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, name, pos, image: snapshot() }),
+      });
+      lastSentAt = Date.now();
+      const d = await r.json().catch(() => ({}));
+      guardsActive = !!d.guardsActive;
+    }
+
     async function tick() {
       if (!on) return;
       try {
-        await fetch("/frame", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id, name, pos, image: snapshot() }),
-        });
-        status.textContent = "✅ Live as '" + name + "' — keep this page open.";
+        const score = motionScore();
+        const moving = score > MOTION_THRESHOLD;
+        if (moving) lastMotionAt = Date.now();
+        if (moving || Date.now() - lastSentAt > HEARTBEAT_MS) {
+          await sendFrame();
+          maybeRecord();
+          status.textContent = moving
+            ? "✅ Live as '" + name + "' — movement, sending" + (guardsActive ? " + clips (guards on)" : "")
+            : "✅ Live as '" + name + "' — quiet scene, saving data";
+        } else {
+          status.textContent = "✅ Live as '" + name + "' — quiet scene, saving data";
+        }
       } catch (err) {
         status.textContent = "Lost connection, retrying...";
       }
@@ -82,7 +171,7 @@
     document.getElementById("go").addEventListener("click", () => {
       name = document.getElementById("name").value.trim() || (detectDevice() + " eye");
       pos = document.getElementById("pos").value.trim();
-      if (!on) { on = true; tick(); }
+      if (!on) { on = true; lastSentAt = 0; tick(); }
     });
   </script>
 </body>
